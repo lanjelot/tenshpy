@@ -14,11 +14,11 @@ from logging.handlers import SysLogHandler
 formatter = logging.Formatter('%(name)s[%(process)d]: %(levelname)s - %(message)s')
 handler = SysLogHandler(address="/dev/log")
 handler.setFormatter(formatter)
-logger = logging.getLogger('logmon')
+logger = logging.getLogger('tenshpy')
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
-def load_conf(conf='/etc/logmon.regex'):
+def load_conf(conf='/etc/tenshpy.conf'):
   re_prog = {}
   re_line = []
 
@@ -163,8 +163,8 @@ signal.signal(signal.SIGINT, flush_queues)
 signal.signal(signal.SIGTERM, flush_queues)
 signal.signal(signal.SIGHUP, flush_queues)
 
-logre = re.compile('\w{3}  ?\d{1,2} \d{2}:\d{2}:\d{2} dora ([a-zA-Z0-9_-]+)(\[\d+\])?: (.*)$')
-logfiles = ['/var/log/messages', '/var/log/secure', '/var/log/twitstlk.log', ]
+logre = re.compile('\w{3}  ?\d{1,2} \d{2}:\d{2}:\d{2} dora ([a-zA-Z0-9_/-]+)(\[\d+\])?: (.*)$')
+logfiles = ['/var/log/messages', '/var/log/secure', '/var/log/maillog', '/var/log/twitstlk.log']
 fdmap = {}
 fds = []
 
