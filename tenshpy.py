@@ -18,13 +18,20 @@ logger = logging.getLogger('tenshpy')
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
+#formatter = logging.Formatter('%(asctime)s %(name)-7s %(levelname)7s - %(message)s', datefmt='%H:%M:%S')
+#handler = logging.StreamHandler()
+#handler.setFormatter(formatter)
+#logger = logging.getLogger('tenshpy')
+#logger.setLevel(logging.DEBUG)
+#logger.addHandler(handler)
+
 def load_conf(conf='/etc/tenshpy.conf'):
   re_prog = {}
   re_line = []
 
   logger.info('Loading conf: %s' % conf)
 
-  pg = ''
+  pg = None
   for l in open(conf):
     l = l.strip()
     if not l: continue
@@ -37,65 +44,64 @@ def load_conf(conf='/etc/tenshpy.conf'):
         re_prog[pg] = []
       continue
 
-    if l.startswith('gorp'):
+    if l == 'gorp':
       logger.debug('gorp: %s' % pg)
-      pg = ''
+      pg = None
       continue
 
-    if re.match('(%s) .+' % '|'.join(queues.keys()), l):
+    if re.match('(%s)(,[^ ]+)? .+' % '|'.join(queues), l):
       logger.debug('l: %s' % l)
-      action, regex = l.split(' ', 1)
       if not pg:
         re_line.append(l)
       else:
         re_prog[pg].append(l)
       
     else:
-      logger.warn('Invalid line: %s' % l)
+      logger.warn('Invalid conf line: %s' % l)
 
   return re_prog, re_line
 
 #logger.debug('re_prog')
-#for p, r in re_prog.iteritems():
+#for p, r in re_prog.items():
 #  print('%s: %s' % (p, r))
 
 #logger.debug('re_line')
 #for r in re_line:
 #  print('%s' % r)
 
-def report(p):
-    logger.debug('report: %s' % p)
+def report(q):
+    logger.debug('reporting: %s' % q)
+    if q == 'trash': return
 
-    if p != 'trash':
+    email = []
+    for item, count in sorted(queues[q].items(), reverse=True):
+      email.append('%d: %s' % (count, item))
 
-      email = []
-      for item, count in sorted(queues[p].iteritems(), reverse=True):
-        email.append('%d: %s' % (count, item))
+    if email:
+      logger.debug('Sending: %s' % email)
+      conn = SMTP()
+      conn.connect('127.0.0.1', 25)
+      conn.ehlo('127.0.0.1')
+      conn.mail('tenshpy')
+      conn.rcpt('root')
+      conn.data('Subject: tenshpy - %s\n\n%s\n' % (q, '\n'.join(email)))
+      conn.quit()
 
-      if email:
-        logger.debug('Sending: %s' % email)
-        conn = SMTP()
-        conn.connect('127.0.0.1', 25)
-        conn.ehlo('logmon')
-        conn.mail('logmon')
-        conn.rcpt('root')
-        conn.data('Subject: logmon - %s\n\n%s\n' % (p, '\n'.join(email)))
-        conn.quit()
-
-    queues[p] = {}
 
 def monitor():
   
-  stimes = {}
-  for p in delays.iterkeys():
-    stimes[p] = time()
+  start_times = {}
+  for q in delays:
+    start_times[q] = time()
+
 
   while True:
 
-    for p, t in stimes.iteritems():
-      if time() - t > delays[p]:
-        report(p)
-        stimes[p] = time()
+    for q, t in start_times.items():
+      if time() - t > delays[q]:
+        report(q)
+        queues[q] = {}
+        start_times[q] = time()
 
     sleep(3)
     
@@ -104,58 +110,97 @@ def monitor():
 
     for fd in rlist:
       f = fdmap[fd]
-      s = fd.readline().rstrip()
-      if not s: continue
-      logger.debug('%s: %s' % (f, s))
+      l = fd.readline().rstrip()
+      if not l: continue
+      logger.debug('%s: %s' % (f, l))
 
-      m = logre.match(s)
+      m = logline_re.match(l)
       if not m:
-        logger.warn('unsupported logline: %s' % s)
+        logger.warn('Unsupported logline: %s' % l)
         continue 
 
       prog, _, mesg = m.groups()
       item = '%s: %s' % (prog, mesg)
 
       if prog not in re_prog:
-        relist = re_line[:] 
+        relist = re_line
       else:
-        relist = re_prog[prog]
-
-      target = queues['unexpected']
+        relist = re_prog[prog] + re_line
 
       for xpr in relist:
-        action, regex = xpr.split(' ', 1)
+        qname, regex = xpr.split(' ', 1)
         m = re.match(regex, mesg)
 
         if not m:
           logger.debug('Not matching: %s' % xpr)
           continue
         
-        logger.debug('Matching: %s' % action)
+        logger.debug('Matching: %s %s' % (qname, regex))
 
         for g in m.groups():
-          mesg = re.sub(g, '___', mesg, count=1)
+          mesg = mesg.replace(g, '___', 1)
 
         item = '%s: %s' % (prog, mesg)
-        target = queues[action]
+        logger.debug('item: %s' % item)
+
+        if ',' not in qname:
+          qmatch = qname
+          break
+
+        qnames = qname.split(',')
+        qmatch = qnames[0]
+
+        if item not in cache:
+          cache[item] = [1, time()]
+          break
+
+        cache[item][0] += 1
+
+        count, start = cache[item]
+        logger.debug('count: %d, start: %d' % (count, start))
+
+        for n in qnames[1:]:
+          qname, rate = n.split(':')
+          x, y = rate.split('/')
+          logger.debug('x: %s, y: %s' % (x, y))
+
+          if count >= int(x):
+            delta = time() - start
+            logger.debug('delta: %d' % delta)
+
+            if delta <= int(y):
+              logger.debug('rate match')
+              qmatch = qname
+
+              total = 0
+              for queue in queues.values():
+                if item in queue:
+                  total += queue[item]
+                  logger.debug('new total: %d' % total)
+                  del queue[item]
+
+              queues[qmatch][item] = total
+              del cache[item]
+
         break 
 
-      logger.debug('item: %s' % item)
-      if item not in target:
-        target[item] = 1
+      logger.debug('qmatch: %s' % qmatch)
+      queue = queues[qmatch]
+
+      if item not in queue:
+        queue[item] = 1
       else:
-        target[item] += 1
+        queue[item] += 1
 
 def flush_queues(signum, sframe):
   logger.info('Flushing queues (signum: %d)' % signum)
 
-  for p in delays.iterkeys():
-    report(p)
-
   if signum == signal.SIGHUP:
     re_prog, re_line = load_conf()
-
+    cache = {}
   else:
+    for q in delays:
+      report(q)
     sys.exit(0)
     
 # init
@@ -163,15 +208,28 @@ signal.signal(signal.SIGINT, flush_queues)
 signal.signal(signal.SIGTERM, flush_queues)
 signal.signal(signal.SIGHUP, flush_queues)
 
-logre = re.compile('\w{3}  ?\d{1,2} \d{2}:\d{2}:\d{2} dora ([a-zA-Z0-9_/-]+)(\[\d+\])?: (.*)$')
-logfiles = ['/var/log/messages', '/var/log/secure', '/var/log/maillog', '/var/log/twitstlk.log']
+logline_re = re.compile('\w{3}  ?\d{1,2} \d{2}:\d{2}:\d{2} dora ([a-zA-Z0-9_/-]+)(\[\d+\])?: (.*)$')
+logfiles = [
+  '/var/log/messages',
+  '/var/log/secure',
+  '/var/log/maillog',
+  '/var/log/twitstlk.log',
+  '/var/log/ulogd/ulogd.syslogemu']
 fdmap = {}
 fds = []
 
-delays = {'security': 5, 'unexpected': 2*60, 'report': 30*60, 'trash': 60}
-queues = {}
-for p in delays.keys():
-  queues[p] = {}
+delays = {
+  'security': 30,     # 30"
+  'unexpected': 2*60, # 2'
+  'report': 30*60,    # 30'
+  'mail': 8*3600,     # 8h
+  'trash': 60}
+
+queues = {} # {'security': {}, ...
+for q in delays:
+  queues[q] = {}
+
+cache = {} # {'sshd: Failed password for': [count, start_time], ...}
 
 re_prog, re_line = load_conf()
 
