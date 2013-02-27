@@ -10,20 +10,22 @@ import re
 import sys
 
 import logging
-from logging.handlers import SysLogHandler
-formatter = logging.Formatter('%(name)s[%(process)d]: %(levelname)s - %(message)s')
-handler = SysLogHandler(address="/dev/log")
-handler.setFormatter(formatter)
-logger = logging.getLogger('tenshpy')
-logger.setLevel(logging.INFO)
-logger.addHandler(handler)
 
-#formatter = logging.Formatter('%(asctime)s %(name)-7s %(levelname)7s - %(message)s', datefmt='%H:%M:%S')
-#handler = logging.StreamHandler()
-#handler.setFormatter(formatter)
-#logger = logging.getLogger('tenshpy')
-#logger.setLevel(logging.DEBUG)
-#logger.addHandler(handler)
+if '-d' in sys.argv:
+  formatter = logging.Formatter('%(asctime)s %(name)-7s %(levelname)7s - %(message)s', datefmt='%H:%M:%S')
+  handler = logging.StreamHandler()
+  handler.setFormatter(formatter)
+  logger = logging.getLogger('tenshpy')
+  logger.setLevel(logging.DEBUG)
+  logger.addHandler(handler)
+else:
+  from logging.handlers import SysLogHandler
+  formatter = logging.Formatter('%(name)s[%(process)d]: %(levelname)s - %(message)s')
+  handler = SysLogHandler(address="/dev/log")
+  handler.setFormatter(formatter)
+  logger = logging.getLogger('tenshpy')
+  logger.setLevel(logging.INFO)
+  logger.addHandler(handler)
 
 def load_conf(conf='/etc/tenshpy.conf'):
   re_prog = {}
@@ -119,7 +121,13 @@ def monitor():
         logger.warn('Unsupported logline: %s' % l)
         continue 
 
-      prog, _, mesg = m.groups()
+      l = m.group(1)
+      m = msgline_re.match(l)
+      if not m:
+        prog, mesg = 'NoProg', l
+      else:
+        prog, _, mesg = m.groups()
+
       item = '%s: %s' % (prog, mesg)
 
       if prog not in re_prog:
@@ -192,12 +200,25 @@ def monitor():
       else:
         queue[item] += 1
 
+def open_logs(logfiles):
+  fdmap = {}
+  fds = []
+  for f in logfiles:
+    fd = open(f)
+    fd.seek(0, 2)
+    fds.append(fd)
+    fdmap[fd] = f
+
+  return fds, fdmap
+
 def flush_queues(signum, sframe):
   logger.info('Flushing queues (signum: %d)' % signum)
+  global cache, re_prog, re_line, fds, fdmap
 
   if signum == signal.SIGHUP:
-    re_prog, re_line = load_conf()
     cache = {}
+    re_prog, re_line = load_conf()
+    fds, fdmap = open_logs(logfiles)
   else:
     for q in delays:
       report(q)
@@ -208,15 +229,14 @@ signal.signal(signal.SIGINT, flush_queues)
 signal.signal(signal.SIGTERM, flush_queues)
 signal.signal(signal.SIGHUP, flush_queues)
 
-logline_re = re.compile('\w{3}  ?\d{1,2} \d{2}:\d{2}:\d{2} dora ([a-zA-Z0-9_/-]+)(\[\d+\])?: (.*)$')
+logline_re = re.compile('\w{3}  ?\d{1,2} \d{2}:\d{2}:\d{2} \w+ (.+)$')
+msgline_re = re.compile('([a-zA-Z0-9_/.-]+)(\[\d+\])?: (.*)$')
 logfiles = [
   '/var/log/messages',
   '/var/log/secure',
   '/var/log/maillog',
   '/var/log/twitstlk.log',
   '/var/log/ulogd/ulogd.syslogemu']
-fdmap = {}
-fds = []
 
 delays = {
   'security': 30,     # 30"
@@ -230,14 +250,8 @@ for q in delays:
   queues[q] = {}
 
 cache = {} # {'sshd: Failed password for': [count, start_time], ...}
-
 re_prog, re_line = load_conf()
-
-for f in logfiles:
-  fd = open(f)
-  fd.seek(0, 2)
-  fds.append(fd)
-  fdmap[fd] = f
+fds, fdmap = open_logs(logfiles)
 
 while True:
   try:
