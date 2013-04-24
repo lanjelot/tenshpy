@@ -105,100 +105,102 @@ def monitor():
         queues[q] = {}
         start_times[q] = time()
 
-    sleep(3)
-    
+    sleep(5)
+
     rlist, _, _ = select(fds, [], [])
     if not rlist: continue
 
     for fd in rlist:
       f = fdmap[fd]
-      l = fd.readline().rstrip()
-      if not l: continue
-      logger.debug('%s: %s' % (f, l))
+      while True:
+        l = fd.readline()
+        l = l.rstrip()
+        if not l: break
+        logger.debug('%s: %s' % (f, l))
 
-      m = logline_re.match(l)
-      if not m:
-        logger.warn('Unsupported logline: %s' % l)
-        continue 
-
-      l = m.group(1)
-      m = msgline_re.match(l)
-      if not m:
-        prog, mesg = 'NoProg', l
-      else:
-        prog, _, mesg = m.groups()
-
-      item = '%s: %s' % (prog, mesg)
-
-      if prog not in re_prog:
-        relist = re_line
-      else:
-        relist = re_prog[prog] + re_line
-
-      for xpr in relist:
-        qname, regex = xpr.split(' ', 1)
-        m = re.match(regex, mesg)
-
+        m = logline_re.match(l)
         if not m:
-          logger.debug('Not matching: %s' % xpr)
+          logger.warn('Unsupported logline: %s' % l)
           continue
-        
-        logger.debug('Matching: %s %s' % (qname, regex))
 
-        for g in m.groups():
-          mesg = mesg.replace(g, '___', 1)
+        l = m.group(1)
+        m = msgline_re.match(l)
+        if not m:
+          prog, mesg = 'NoProg', l
+        else:
+          prog, _, mesg = m.groups()
 
         item = '%s: %s' % (prog, mesg)
-        logger.debug('item: %s' % item)
 
-        if ',' not in qname:
-          qmatch = qname
+        if prog not in re_prog:
+          relist = re_line
+        else:
+          relist = re_prog[prog] + re_line
+
+        for xpr in relist:
+          qname, regex = xpr.split(' ', 1)
+          m = re.match(regex, mesg)
+
+          if not m:
+            logger.debug('Not matching: %s' % xpr)
+            continue
+
+          logger.debug('Matching: %s %s' % (qname, regex))
+
+          for g in m.groups():
+            mesg = mesg.replace(g, '___', 1)
+
+          item = '%s: %s' % (prog, mesg)
+          logger.debug('item: %s' % item)
+
+          if ',' not in qname:
+            qmatch = qname
+            break
+
+          qnames = qname.split(',')
+          qmatch = qnames[0]
+
+          if item not in cache:
+            cache[item] = [1, time()]
+            break
+
+          cache[item][0] += 1
+
+          count, start = cache[item]
+          logger.debug('count: %d, start: %d' % (count, start))
+
+          for n in qnames[1:]:
+            qname, rate = n.split(':')
+            x, y = rate.split('/')
+            logger.debug('x: %s, y: %s' % (x, y))
+
+            if count >= int(x):
+              delta = time() - start
+              logger.debug('delta: %d' % delta)
+
+              if delta <= int(y):
+                logger.debug('rate match')
+                qmatch = qname
+
+                total = 0
+                for queue in queues.values():
+                  if item in queue:
+                    total += queue[item]
+                    logger.debug('new total: %d' % total)
+                    del queue[item]
+
+                queues[qmatch][item] = total
+                del cache[item]
+
           break
 
-        qnames = qname.split(',')
-        qmatch = qnames[0]
+        logger.debug('qmatch: %s' % qmatch)
+        queue = queues[qmatch]
 
-        if item not in cache:
-          cache[item] = [1, time()]
-          break
-
-        cache[item][0] += 1
-
-        count, start = cache[item]
-        logger.debug('count: %d, start: %d' % (count, start))
-
-        for n in qnames[1:]:
-          qname, rate = n.split(':')
-          x, y = rate.split('/')
-          logger.debug('x: %s, y: %s' % (x, y))
-
-          if count >= int(x):
-            delta = time() - start
-            logger.debug('delta: %d' % delta)
-
-            if delta <= int(y):
-              logger.debug('rate match')
-              qmatch = qname
-
-              total = 0
-              for queue in queues.values():
-                if item in queue:
-                  total += queue[item]
-                  logger.debug('new total: %d' % total)
-                  del queue[item]
-
-              queues[qmatch][item] = total
-              del cache[item]
-
-        break 
-
-      logger.debug('qmatch: %s' % qmatch)
-      queue = queues[qmatch]
-
-      if item not in queue:
-        queue[item] = 1
-      else:
-        queue[item] += 1
+        if item not in queue:
+          queue[item] = 1
+        else:
+          queue[item] += 1
 
 def open_logs(logfiles):
   fdmap = {}
